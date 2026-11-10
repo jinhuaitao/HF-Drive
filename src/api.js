@@ -16,7 +16,7 @@ import { buildZipStream, zipHeaders } from './lib/zip.js';
 const CHUNK_SIZE = 8 * 1024 * 1024; // 8MB / 分片
 const MAX_UPLOAD = 50 * 1024 * 1024 * 1024; // 50GB
 const MAX_ZIP = 3.6 * 1024 * 1024 * 1024; // ZIP 上限（未做 zip64）
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 
 const json = U.json;
 const fail = U.fail;
@@ -812,7 +812,7 @@ async function apiCopyNodes(ctx) {
 
 // ---------------------------------------------------------------- 下载
 
-async function* readNode(ctx, node, rangeHeader, { maxBytes } = {}) {
+async function* readNode(ctx, node, rangeHeader, { maxBytes, prefetch = 2 } = {}) {
   const hf = hfCfg(ctx.config);
   const chunkSize = node.chunkSize || CHUNK_SIZE;
   const total = node.size || 0;
@@ -832,28 +832,49 @@ async function* readNode(ctx, node, rangeHeader, { maxBytes } = {}) {
 
   const first = Math.floor(start / chunkSize);
   const last = Math.floor(end / chunkSize);
-  for (let i = first; i <= last; i++) {
+
+  // 预取：在消费当前分片的同时把下一片的分片请求发出去，
+  // 把「串行等 RTT」变成流水线，大文件下载能明显加速。
+  const pending = new Map();
+  const begin = (i) => {
+    if (i < first || i > last || pending.has(i)) return;
     const chunkStart = i * chunkSize;
     const chunkEnd = Math.min(total, chunkStart + chunkSize) - 1;
     const s = Math.max(start, chunkStart);
     const e = Math.min(end, chunkEnd);
-    const res = await HF.fetchFile({
+    const p = HF.fetchFile({
       token: hf.token,
       repo: hf.repo,
       path: HF.chunkPath(node.id, i),
       range: `bytes=${s - chunkStart}-${e - chunkStart}`,
-    });
-    if (!res.ok || !res.body) throw new Error(`读取分片 ${i} 失败（HTTP ${res.status}）`);
-    const reader = res.body.getReader();
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value && value.length) yield value;
+    }).catch((err) => ({ __error: err }));
+    pending.set(i, p);
+  };
+
+  try {
+    for (let i = first; i <= last; i++) {
+      for (let k = 0; k < prefetch; k++) begin(i + k);
+      const res = await pending.get(i);
+      pending.delete(i);
+      if (!res || res.__error) throw res?.__error || new Error(`读取分片 ${i} 失败`);
+      if (!res.ok || !res.body) throw new Error(`读取分片 ${i} 失败（HTTP ${res.status}）`);
+      const reader = res.body.getReader();
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value && value.length) yield value;
+        }
+      } finally {
+        try { reader.releaseLock(); } catch {}
       }
-    } finally {
-      try { reader.releaseLock(); } catch {}
     }
+  } finally {
+    // 客户端中途断开时，取消还没消费的预取请求
+    for (const p of pending.values()) {
+      p.then((r) => { try { r?.body?.cancel(); } catch {} }).catch(() => {});
+    }
+    pending.clear();
   }
 }
 
@@ -872,7 +893,8 @@ async function apiFileStream(ctx, id) {
   const headers = {
     'Content-Type': mime,
     'Accept-Ranges': 'bytes',
-    'Cache-Control': 'private, max-age=0, must-revalidate',
+    // 文件按 ID 存放，内容永不变化 → 允许浏览器缓存，避免列表滚动/重渲染时反复下载缩略图
+    'Cache-Control': inline ? 'private, max-age=86400' : 'private, max-age=0, must-revalidate',
     'Content-Disposition': U.contentDisposition(node.name, inline),
   };
 
@@ -1229,7 +1251,7 @@ async function streamPublicFile(env, config, index, node, request) {
   const headers = {
     'Content-Type': node.mime || U.mimeOf(node.name),
     'Accept-Ranges': 'bytes',
-    'Cache-Control': 'private, max-age=0',
+    'Cache-Control': inline ? 'private, max-age=86400' : 'private, max-age=0',
     'Content-Disposition': U.contentDisposition(node.name, inline),
   };
   const ctx = { config, env };

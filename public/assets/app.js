@@ -334,7 +334,7 @@ function onGlobalKey(e) {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') {
     e.preventDefault();
     state.items.forEach((n) => state.selected.add(n.id));
-    renderContent(); renderToolbar();
+    syncSelection();
     return;
   }
   if (e.key === 'Delete' || (e.metaKey || e.ctrlKey) && e.key === 'Backspace') {
@@ -674,8 +674,7 @@ function renderList(items) {
   headCheck.addEventListener('change', () => {
     if (headCheck.checked) items.forEach((n) => state.selected.add(n.id));
     else items.forEach((n) => state.selected.delete(n.id));
-    renderContent();
-    renderToolbar();
+    syncSelection();
   });
 
   const head = h('div', { class: 'ft-head' },
@@ -718,8 +717,8 @@ function rowFor(node) {
     toggleSelect(node.id, e.shiftKey);
   });
 
-  const thumb = node.type === 'file' && kind === 'image' && node.size < 8 * 1024 * 1024
-    ? h('img', { class: 'thumb', src: `/api/file/${node.id}?inline=1`, loading: 'lazy', decoding: 'async', alt: '' })
+  const thumb = node.type === 'file' && kind === 'image' && node.size < 4 * 1024 * 1024
+    ? h('img', { class: 'thumb', src: `/api/file/${node.id}?inline=1`, loading: 'lazy', decoding: 'async', fetchpriority: 'low', alt: '' })
     : fileIcon(kind);
 
   const nameEl = h('div', { class: 'file-name' },
@@ -768,8 +767,8 @@ function renderGrid(items) {
     const kind = node.type === 'folder' ? 'folder' : fileKind(node.name, node.mime);
     const selected = state.selected.has(node.id);
     const thumbBox = h('div', { class: 'fg-thumb' });
-    if (node.type === 'file' && kind === 'image' && node.size < 8 * 1024 * 1024) {
-      thumbBox.append(h('img', { src: `/api/file/${node.id}?inline=1`, loading: 'lazy', decoding: 'async', alt: '' }));
+    if (node.type === 'file' && kind === 'image' && node.size < 4 * 1024 * 1024) {
+      thumbBox.append(h('img', { src: `/api/file/${node.id}?inline=1`, loading: 'lazy', decoding: 'async', fetchpriority: 'low', alt: '' }));
     } else {
       thumbBox.append(fileIcon(kind));
     }
@@ -838,8 +837,7 @@ function toggleSelect(id, shift = false, additive = true) {
       const [from, to] = a < b ? [a, b] : [b, a];
       for (let i = from; i <= to; i++) state.selected.add(items[i].id);
       state.lastClicked = id;
-      renderContent();
-      renderToolbar();
+      syncSelection();
       return;
     }
   }
@@ -852,21 +850,40 @@ function toggleSelect(id, shift = false, additive = true) {
     state.selected.add(id);
   }
   state.lastClicked = id;
-  renderContent();
-  renderToolbar();
+  syncSelection();
 }
 
 function selectOnly(id) {
   state.selected.clear();
   state.selected.add(id);
   state.lastClicked = id;
-  renderContent();
-  renderToolbar();
+  syncSelection();
 }
 
 function clearSelection() {
   state.selected.clear();
-  renderContent();
+  syncSelection();
+}
+
+/**
+ * 只同步选中态：改 class 和 checkbox，不重建 DOM。
+ * 之前每次点选都 renderContent()，等于把整个列表（含图片）重新创建一遍，
+ * 百来个文件时点击会有明显延迟、缩略图还会闪。
+ */
+function syncSelection() {
+  const rows = document.querySelectorAll('#content-inner .ft-row, #content-inner .fg-card');
+  for (const el of rows) {
+    const on = state.selected.has(el.dataset.id);
+    el.classList.toggle('selected', on);
+    const cb = el.querySelector('input[type="checkbox"]');
+    if (cb) cb.checked = on;
+  }
+  const headCb = document.querySelector('.ft-head input[type="checkbox"]');
+  if (headCb) {
+    const n = state.items.reduce((acc, it) => acc + (state.selected.has(it.id) ? 1 : 0), 0);
+    headCb.checked = n > 0 && n === state.items.length;
+    headCb.indeterminate = n > 0 && n < state.items.length;
+  }
   renderToolbar();
 }
 

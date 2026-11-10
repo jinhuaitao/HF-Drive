@@ -1,6 +1,6 @@
 {
   "name": "hf-drive",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "Web 版网盘，文件实体存放在 HuggingFace 私有 Storage，元数据放在 Cloudflare R2",

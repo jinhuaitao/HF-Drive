@@ -9,8 +9,10 @@ export class Uploader {
     this.tasks = [];
     this.folderCache = new Map();
     this.active = 0;
-    this.maxFiles = 2;
-    this.chunkConcurrency = 2;
+    // 并发度：同时传 3 个文件、每个文件 3 个分片并发。
+    // HF 侧对 commit 有速率限制，Worker 内部已做 429/5xx 退避重试，这里失败也会重试。
+    this.maxFiles = 3;
+    this.chunkConcurrency = 3;
     this.panel = document.getElementById('upload-panel');
     this.dirty = false;
     this.lastNotify = 0;
@@ -152,15 +154,17 @@ export class Uploader {
 
   async retry(fn, task) {
     let lastErr;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 4; attempt++) {
       if (task.status === 'canceled') throw new Error('已取消');
       try {
         return await fn();
       } catch (err) {
         lastErr = err;
-        if (err?.status && err.status >= 400 && err.status < 500 && err.status !== 429) throw err;
         if (err?.name === 'AbortError') throw err;
-        await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+        if (err?.status && err.status >= 400 && err.status < 500 && err.status !== 429) throw err;
+        // 429（限流）等更久，其它错误短退避
+        const base = err?.status === 429 ? 1500 : 500;
+        await new Promise((r) => setTimeout(r, base * (attempt + 1) + Math.random() * 250));
       }
     }
     throw lastErr;

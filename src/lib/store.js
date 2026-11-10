@@ -1,5 +1,6 @@
 // R2 元数据层：带 etag 乐观锁的 JSON 读写
 import { ROOT } from './util.js';
+import { cacheGet, cacheSet, cacheDel } from './cache.js';
 
 export const KEY_CONFIG = 'sys/config.json';
 export const KEY_INDEX = 'sys/index.json';
@@ -7,6 +8,9 @@ export const KEY_SHARES = 'sys/shares.json';
 export const KEY_UPLOAD = (id) => `sys/uploads/${id}.json`;
 export const KEY_SESSION = (token) => `sys/sessions/${token}.json`;
 export const KEY_THROTTLE = (ip) => `sys/throttle/${ip.replace(/[^a-zA-Z0-9.:_-]/g, '_')}.json`;
+
+const INDEX_TTL = 2000;
+const SHARES_TTL = 10000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -47,20 +51,31 @@ export async function deleteKeys(env, keys) {
 /** 带重试的索引读改写；fn 直接修改传入的 index 对象 */
 export async function mutateIndex(env, fn) {
   for (let attempt = 0; attempt < 8; attempt++) {
+    // 这里必须绕过缓存，拿到最新 etag
     const cur = await getJSON(env, KEY_INDEX);
     const index = cur?.value && cur.value.nodes ? cur.value : { v: 1, nodes: {}, updatedAt: 0 };
     const result = await fn(index);
     index.updatedAt = Date.now();
     const ok = await putJSON(env, KEY_INDEX, index, cur?.etag);
-    if (ok) return result;
+    if (ok) {
+      cacheSet('index', index, INDEX_TTL);
+      return result;
+    }
     await sleep(15 + Math.random() * 60 * (attempt + 1));
   }
   throw new Error('元数据繁忙，请重试（索引写入冲突）');
 }
 
 export async function readIndex(env) {
+  const hit = cacheGet('index');
+  if (hit) return hit;
   const cur = await getJSON(env, KEY_INDEX);
-  return cur?.value && cur.value.nodes ? cur.value : { v: 1, nodes: {}, updatedAt: 0 };
+  const index = cur?.value && cur.value.nodes ? cur.value : { v: 1, nodes: {}, updatedAt: 0 };
+  return cacheSet('index', index, INDEX_TTL);
+}
+
+export function invalidateIndex() {
+  cacheDel('index');
 }
 
 export async function mutateShares(env, fn) {
@@ -69,15 +84,21 @@ export async function mutateShares(env, fn) {
     const shares = cur?.value?.shares ? cur.value : { v: 1, shares: {} };
     const result = await fn(shares);
     const ok = await putJSON(env, KEY_SHARES, shares, cur?.etag);
-    if (ok) return result;
+    if (ok) {
+      cacheSet('shares', shares, SHARES_TTL);
+      return result;
+    }
     await sleep(15 + Math.random() * 60);
   }
   throw new Error('分享数据写入冲突，请重试');
 }
 
 export async function readShares(env) {
+  const hit = cacheGet('shares');
+  if (hit) return hit;
   const cur = await getJSON(env, KEY_SHARES);
-  return cur?.value?.shares ? cur.value : { v: 1, shares: {} };
+  const shares = cur?.value?.shares ? cur.value : { v: 1, shares: {} };
+  return cacheSet('shares', shares, SHARES_TTL);
 }
 
 // ---------- 索引查询辅助 ----------

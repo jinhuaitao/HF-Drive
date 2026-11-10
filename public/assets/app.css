@@ -351,6 +351,9 @@ textarea.input { height: auto; padding: 11px 13px; resize: vertical; font-family
 .ft-row {
   height: 52px; padding: 0 10px; border-bottom: 1px solid var(--border);
   cursor: default; transition: background 0.12s ease; position: relative;
+  /* 长列表里跳过屏幕外行的渲染，滚动更顺；高度固定所以不会跳动 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 52px;
 }
 .ft-row:last-child { border-bottom: none; }
 .ft-row:hover { background: var(--surface-2); }

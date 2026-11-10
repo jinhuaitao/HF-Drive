@@ -1,6 +1,7 @@
 // 认证：口令哈希、会话、登录限流
 import { b64ToBytes, bytesToB64, pbkdf2, pbkdf2Single, PBKDF2_ROUND_MAX, randomToken, safeEqual, sha256Hex, serializeCookie, parseCookies, clientIp, nowSec } from './util.js';
 import { getJSON, putJSON, deleteKeys, KEY_CONFIG, KEY_SESSION, KEY_THROTTLE } from './store.js';
+import { cacheGet, cacheSet, cacheDel } from './cache.js';
 
 export const SESSION_COOKIE = 'hfd_session';
 export const SESSION_TTL = 60 * 60 * 24 * 30; // 30 天
@@ -9,14 +10,17 @@ const FAIL_WINDOW = 15 * 60;
 const LOCK_TIME = 15 * 60;
 
 export async function readConfig(env) {
+  const hit = cacheGet('config');
+  if (hit !== undefined) return hit;
   const cur = await getJSON(env, KEY_CONFIG);
-  if (!cur?.value || !cur.value.username) return null;
-  return cur.value;
+  const config = cur?.value && cur.value.username ? cur.value : null;
+  return cacheSet('config', config, config ? 60000 : 3000);
 }
 
 export async function writeConfig(env, config) {
   const ok = await putJSON(env, KEY_CONFIG, config);
   if (!ok) throw new Error('配置写入失败');
+  cacheSet('config', config, 60000);
   return config;
 }
 
@@ -48,16 +52,20 @@ export async function verifyPassword(config, password) {
   return false;
 }
 
+const SESSION_CACHE_TTL = 15000;
+
 export async function createSession(env, request, username) {
   const token = randomToken(32);
   const exp = nowSec() + SESSION_TTL;
-  await putJSON(env, KEY_SESSION(token), {
+  const session = {
     u: username,
     exp,
     ip: clientIp(request),
     ua: (request.headers.get('User-Agent') || '').slice(0, 120),
     createdAt: nowSec(),
-  });
+  };
+  await putJSON(env, KEY_SESSION(token), session);
+  cacheSet('sess:' + token, session, SESSION_CACHE_TTL);
   return { token, exp };
 }
 
@@ -73,17 +81,31 @@ export async function getAuth(env, request) {
   const cookies = parseCookies(request);
   const token = cookies[SESSION_COOKIE];
   if (!token || !/^[a-f0-9]{64}$/.test(token)) return null;
+
+  const cacheKey = 'sess:' + token;
+  const cached = cacheGet(cacheKey);
+  if (cached !== undefined) {
+    if (!cached) return null;
+    return { token, session: cached };
+  }
+
   const cur = await getJSON(env, KEY_SESSION(token));
-  if (!cur?.value) return null;
-  if (!cur.value.exp || cur.value.exp < nowSec()) {
-    await deleteKeys(env, KEY_SESSION(token));
+  if (!cur?.value) {
+    cacheSet(cacheKey, null, 5000);
     return null;
   }
+  if (!cur.value.exp || cur.value.exp < nowSec()) {
+    await deleteKeys(env, KEY_SESSION(token));
+    cacheSet(cacheKey, null, 5000);
+    return null;
+  }
+  cacheSet(cacheKey, cur.value, SESSION_CACHE_TTL);
   return { token, session: cur.value };
 }
 
 export async function destroySession(env, token) {
   if (!token) return;
+  cacheDel('sess:' + token);
   await deleteKeys(env, KEY_SESSION(token));
 }
 
