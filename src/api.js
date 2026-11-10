@@ -16,7 +16,7 @@ import { buildZipStream, zipHeaders } from './lib/zip.js';
 const CHUNK_SIZE = 8 * 1024 * 1024; // 8MB / 分片
 const MAX_UPLOAD = 50 * 1024 * 1024 * 1024; // 50GB
 const MAX_ZIP = 3.6 * 1024 * 1024 * 1024; // ZIP 上限（未做 zip64）
-const VERSION = '1.1.0';
+const VERSION = '1.1.1';
 
 const json = U.json;
 const fail = U.fail;
@@ -551,13 +551,25 @@ async function apiUploadChunk(ctx) {
   }
 
   const hf = hfCfg(ctx.config);
-  await HF.commitBase64({
-    token: hf.token,
-    repo: hf.repo,
-    path: HF.chunkPath(id, indexNum),
-    bytes: new Uint8Array(buf),
-    summary: `upload ${id} part ${indexNum + 1}/${rec.chunks}`,
-  });
+  const bytes = new Uint8Array(buf);
+  const summary = `upload ${id} part ${indexNum + 1}/${rec.chunks}`;
+  try {
+    // 二进制内容必须走 git-lfs（HF 的 Xet 仓库拒收内联二进制 blob）
+    await HF.uploadChunkLfs({
+      token: hf.token,
+      repo: hf.repo,
+      path: HF.chunkPath(id, indexNum),
+      bytes,
+      summary,
+    });
+  } catch (err) {
+    // 仓库不支持 LFS 时退回内联 base64（仅对文本内容有效）
+    if (err?.status === 404 || err?.status === 405) {
+      await HF.commitBase64({ token: hf.token, repo: hf.repo, path: HF.chunkPath(id, indexNum), bytes, summary });
+    } else {
+      throw err;
+    }
+  }
   await putJSON(ctx.env, uploadChunkKey(id, indexNum), { ok: true, size: buf.byteLength, at: Date.now() });
   return json({ ok: true, index: indexNum });
 }
@@ -741,7 +753,7 @@ async function apiCopyNodes(ctx) {
   if (!requireFolder(index, target)) return fail(404, 'no_folder', '目标文件夹不存在');
   const hf = hfCfg(ctx.config);
 
-  // 先计算需要复制的内容总量，避免一次性搬运过大
+  // 先计算需要复制的内容总量，兜底路径（真搬字节）用它做体积保护
   let totalBytes = 0;
   const plan = [];
   for (const id of ids) {
@@ -757,23 +769,43 @@ async function apiCopyNodes(ctx) {
       if (n.type === 'file') totalBytes += n.size || 0;
     }
   }
-  if (totalBytes > 2 * 1024 * 1024 * 1024) {
-    return fail(413, 'too_large', '单次复制内容超过 2GB，请分批操作');
-  }
 
-  // 复制分片：读出来再写一份
+  // 复制分片
   const idMap = new Map();
   for (const { node } of plan) idMap.set(node.id, U.uid(node.type === 'folder' ? 'd_' : 'f_'));
 
-  const created = [];
+  // 第一轮：优先「同仓库秒复制」——只提交引用，不搬字节
+  const needFallback = [];
   for (const { node } of plan) {
-    const newId = idMap.get(node.id);
-    if (node.type === 'file' && node.chunks > 0) {
+    if (node.type !== 'file' || !(node.chunks > 0)) continue;
+    let done = false;
+    try {
+      done = await HF.copyChunksInRepo({
+        token: hf.token,
+        repo: hf.repo,
+        fromId: node.id,
+        toId: idMap.get(node.id),
+        chunks: node.chunks,
+        name: node.name,
+      });
+    } catch {
+      done = false;
+    }
+    if (!done) needFallback.push(node);
+  }
+
+  // 第二轮：秒复制拿不到 oid 的，才真正下载再上传（此时才需要体积保护）
+  if (needFallback.length) {
+    if (totalBytes > 2 * 1024 * 1024 * 1024) {
+      return fail(413, 'too_large', '单次复制内容超过 2GB，请分批操作');
+    }
+    for (const node of needFallback) {
+      const newId = idMap.get(node.id);
       for (let i = 0; i < node.chunks; i++) {
         const res = await HF.fetchFile({ token: hf.token, repo: hf.repo, path: HF.chunkPath(node.id, i) });
         if (!res.ok) throw new Error(`读取源分片失败（${node.name} #${i}）`);
         const buf = new Uint8Array(await res.arrayBuffer());
-        await HF.commitBase64({
+        await HF.uploadChunkLfs({
           token: hf.token,
           repo: hf.repo,
           path: HF.chunkPath(newId, i),
@@ -782,8 +814,9 @@ async function apiCopyNodes(ctx) {
         });
       }
     }
-    created.push({ newId, node });
   }
+
+  const created = plan.map(({ node }) => ({ newId: idMap.get(node.id), node }));
 
   const newNodes = await mutateIndex(ctx.env, (idx) => {
     const out = [];
@@ -1377,7 +1410,8 @@ async function apiRebuild(ctx) {
       const id = m[1];
       const rec = found.get(id) || { id, chunks: 0, size: 0, chunkSize: CHUNK_SIZE };
       rec.chunks = Math.max(rec.chunks, parseInt(m[2], 10) + 1);
-      rec.size += item.size || 0;
+      // LFS 文件在 tree 里可能只给出指针大小，优先取 lfs.size（真实字节数）
+      rec.size += item.lfs?.size ?? item.size ?? 0;
       found.set(id, rec);
     }
     if (list.length < 1000) break;

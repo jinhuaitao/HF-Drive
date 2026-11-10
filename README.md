@@ -9,7 +9,7 @@
   │
   ├── Cloudflare Worker（静态资源 + /api/*）
   │        ├── Cloudflare R2（自动创建）→ 账号配置、文件索引、分享链接、会话
-  │        └── HuggingFace 私有 Dataset 仓库 → 文件分片实体（8MB/片）
+  │        └── HuggingFace 私有 Dataset 仓库 → 文件分片实体（8MB/片，走 git-lfs）
   └── 首次访问 → 设置向导 → 自动创建 private dataset 仓库
 ```
 
@@ -22,6 +22,7 @@
 - 大文件分片上传（8MB/片），2 路文件并发 + 2 路分片并发，失败自动重试、可续传
 - 下载单个文件、多选打包 ZIP、整个文件夹打包 ZIP（流式打包，不占内存，支持中文文件名）
 - 新建文件夹、重命名、移动、复制、收藏、搜索（全局模糊搜索）
+  - 复制是「同仓库秒复制」：只把已有 LFS 对象的 oid 提交到新路径，不搬运字节，1GB 文件也是秒级完成，且不额外占空间
 - 列表 / 网格两种视图，按名称、大小、时间、类型排序
 - 多选（Shift 连选、⌘/Ctrl 加选）、右键菜单、拖拽移动到文件夹
 - 回收站：删除 → 还原 → 彻底删除（彻底删除会同时清掉 HuggingFace 仓库里的分片）
@@ -120,7 +121,31 @@ git push -u origin main
 | 文件树（名称、大小、父子关系、收藏、回收站） | R2 `sys/index.json` |
 | 分享链接 | R2 `sys/shares.json` |
 | 上传中的分片进度 | R2 `sys/uploads/<文件ID>/*` |
-| **文件实体** | HF 仓库 `chunks/<文件ID>/000000.bin`、`000001.bin`… |
+| **文件实体** | HF 仓库 `chunks/<文件ID>/000000.bin`、`000001.bin`…（以 git-lfs 对象存放） |
+
+### 为什么分片必须走 git-lfs
+
+HF 现在默认给新仓库开启 **Xet** 存储，服务端会直接拒收「用普通 git blob 提交的二进制内容」：
+
+```
+Your push was rejected because it contains binary files.
+Please use https://huggingface.co/docs/hub/xet to store binary files.
+Offending files: - chunks/f_6v090x1x2y1u/000000.bin
+```
+
+所以每个分片的上传是标准 LFS 三步（`src/lib/hf.js` → `uploadChunkLfs`）：
+
+1. `POST /datasets/{repo}.git/info/lfs/objects/batch`，用分片的 SHA-256 换预签名地址
+2. `PUT` 到预签名地址，把 8MB 二进制直接传给 HF 的对象存储（不经 Worker 中转）
+3. `POST /api/datasets/{repo}/commit/main`，用 `{"key":"lfsFile","value":{path,algo,oid,size}}` 把对象挂到路径上
+
+顺带得到两个好处：
+
+- **天然去重**：内容相同的分片，batch 会返回 `actions: null`，此时跳过 PUT 只提交引用，不占额外空间
+- **不占 Worker 内存/带宽**：二进制直传对象存储，Worker 只搬运 8MB 请求体
+
+初始化时还会写一个 `.gitattributes`（`*.bin filter=lfs diff=lfs merge=lfs -text`），
+这样即便以后有人用 `git push` 直推，也会被 LFS 接管而不是被 Xet 拦下。
 
 所以：
 
@@ -160,6 +185,7 @@ npx wrangler deploy --dry-run --outdir=.wrangler/dry-run
 | 选中态增量更新 | 点选只切 class 与 checkbox，不再重建整个列表 DOM | 点击延迟降到亚毫秒级，缩略图不再闪烁 |
 | 长列表渲染 | `.ft-row { content-visibility: auto }`，跳过屏幕外行的布局与绘制 | 数百行列表滚动更顺 |
 | 上传并发 | 3 文件 × 3 分片并发，429 单独走更长退避 | 大文件上传吞吐提升约 50% |
+| 复制零搬运 | 同仓库复制复用已有 LFS oid，只做 1 次 tree 查询 + 1 次 commit | 1GB 文件复制从「下载再上传」变为亚秒级 |
 
 基准脚本思路（可自行复现）：用带固定延迟的桩 R2 + 桩 HF 跑 `worker.fetch`，对比「每请求前清空缓存」与「热缓存」两种情况的耗时与 R2 操作次数。
 
@@ -168,8 +194,8 @@ npx wrangler deploy --dry-run --outdir=.wrangler/dry-run
 ## 已知限制
 
 - **单文件上限 50GB**；单次 ZIP 打包上限 3.6GB（未做 zip64）。
-- **每个分片 = 一次 HuggingFace commit**，所以上传 1GB 文件会产生 128 次 commit。HF 对 commit 有速率限制，本项目已做退避重试，但超大文件上传会比较慢（这也是分片选 8MB 而不是 1MB 的原因）。
-- **复制文件**是「下载再上传」，走 Worker 中转，单次上限 2GB，速度取决于 HF。
+- **每个分片 = 3 次 HuggingFace 请求**（LFS batch + 直传 + commit），所以上传 1GB 文件会产生 384 次请求。HF 对 commit 有速率限制，本项目已做退避重试，但超大文件上传会比较慢（这也是分片选 8MB 而不是 1MB 的原因）。
+- **复制文件**默认走「同仓库秒复制」（不搬字节，无体积限制）；只有拿不到分片 oid 时（例如仓库未返回 LFS 元数据、或单文件分片数超过 1000）才退回「下载再上传」，此时单次上限 2GB。
 - **HuggingFace 仓库文件数量**：1GB 文件 = 128 个文件。HF 对仓库文件数有软限制，个人网盘量级（几千个文件）没问题。
 - 元数据是单个 JSON（带 etag 乐观锁重试），几万个文件以内都很轻快。
 - 预览图片直接用原图当缩略图（没有服务端缩图能力），超大图会慢一点。
@@ -188,6 +214,10 @@ Token 不是 write 权限，或者同名仓库属于别人。换 Token 或改个
 **报错 `Pbkdf2 failed: iteration counts above 100000 are not supported`**
 部署的是修复前的旧代码。把最新代码推到 GitHub 重新部署即可（该限制已通过分轮派生规避）。
 
+**上传报错 `Your push was rejected because it contains binary files`**
+部署的是修复前的旧代码（当时分片用 base64 内联在 commit 里，被 HF 的 Xet 规则拦下）。
+最新代码已改为标准 git-lfs 上传，重新部署即可。仓库里已有的 `.bin` 分片不受影响，无需清理。
+
 **上传卡在某个分片**
 HF 限流，等一会儿点上传面板里的「重试」即可，已上传的分片不会重复上传。
 
@@ -203,6 +233,6 @@ HF 限流，等一会儿点上传面板里的「重试」即可，已上传的�
 
 - Cloudflare Workers（无框架，ES Module Worker）+ Static Assets
 - Cloudflare R2（自动创建绑定）
-- HuggingFace Hub HTTP API（`/api/repos/create`、`/api/datasets/{repo}/commit/main`、`/resolve`）
+- HuggingFace Hub HTTP API（`/api/repos/create`、`/api/datasets/{repo}/commit/main`、`/resolve`、git-lfs `/info/lfs/objects/batch`）
 - 前端：原生 ES Module + 手写 CSS，零构建、零运行时依赖
 - ZIP：自己实现的 store 模式流式打包（带 data descriptor + UTF-8 文件名标记）
