@@ -62,7 +62,38 @@ export async function sha256Hex(text) {
   return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+/**
+ * Cloudflare Workers（workerd）的 WebCrypto 对单次 PBKDF2 迭代数有 10 万上限，
+ * 超过会抛 "Pbkdf2 failed: iteration counts above 100000 are not supported"。
+ * 这里把总迭代数拆成多轮串联派生（上一轮输出作为下一轮口令），
+ * 累计工作量与直接跑 iterations 次等价，同时永远不超过单次上限。
+ */
+export const PBKDF2_ROUND_MAX = 100000;
+
 export async function pbkdf2(password, saltB64, iterations = 210000) {
+  const salt = b64ToBytes(saltB64);
+  const total = Math.max(1, Math.floor(iterations) || 1);
+  let material = typeof password === 'string' ? enc.encode(password) : password;
+  let remaining = total;
+  let out = new Uint8Array(0);
+
+  while (remaining > 0) {
+    const round = Math.min(PBKDF2_ROUND_MAX, remaining);
+    const key = await crypto.subtle.importKey('raw', material, 'PBKDF2', false, ['deriveBits']);
+    const bits = await crypto.subtle.deriveBits(
+      { name: 'PBKDF2', salt, iterations: round, hash: 'SHA-256' },
+      key,
+      256
+    );
+    out = new Uint8Array(bits);
+    material = out;
+    remaining -= round;
+  }
+  return bytesToB64(out);
+}
+
+/** 单次派生（仅用于兼容早期在允许大迭代数的运行时上生成的哈希） */
+export async function pbkdf2Single(password, saltB64, iterations) {
   const key = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
   const bits = await crypto.subtle.deriveBits(
     { name: 'PBKDF2', salt: b64ToBytes(saltB64), iterations, hash: 'SHA-256' },

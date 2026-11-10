@@ -39,7 +39,10 @@
 - 分享管理页：查看访问次数、复制链接、取消分享
 
 **安全**
-- 首次访问设置向导，密码用 PBKDF2-SHA256（21 万次迭代 + 随机盐）存储
+- 首次访问设置向导，密码用 PBKDF2-SHA256（21 万次迭代 + 随机盐）存储。
+  > Workers 运行时的 WebCrypto 限制单次 PBKDF2 迭代数 **不得超过 10 万**，
+  > 所以实现上拆成 3 轮串联派生（10 万 + 10 万 + 1 万，上一轮输出作为下一轮口令），
+  > 累计工作量与一次跑 21 万次等价，不会触发 `Pbkdf2 failed: iteration counts above 100000`。
 - 服务端随机会话 Token（存 R2，30 天过期，登出立即吊销），HttpOnly + Secure Cookie
 - 登录失败限流：15 分钟内 8 次失败锁定 15 分钟（按 IP）
 - HuggingFace Token 只存在 R2，永不下发到浏览器；下载全部经 Worker 代理，不暴露直链
@@ -164,6 +167,9 @@ npx wrangler deploy --dry-run --outdir=.wrangler/dry-run
 
 **初始化时提示「创建/写入私有仓库失败」**
 Token 不是 write 权限，或者同名仓库属于别人。换 Token 或改个仓库名。
+
+**报错 `Pbkdf2 failed: iteration counts above 100000 are not supported`**
+部署的是修复前的旧代码。把最新代码推到 GitHub 重新部署即可（该限制已通过分轮派生规避）。
 
 **上传卡在某个分片**
 HF 限流，等一会儿点上传面板里的「重试」即可，已上传的分片不会重复上传。

@@ -1,5 +1,5 @@
 // 认证：口令哈希、会话、登录限流
-import { b64ToBytes, bytesToB64, pbkdf2, randomToken, safeEqual, sha256Hex, serializeCookie, parseCookies, clientIp, nowSec } from './util.js';
+import { b64ToBytes, bytesToB64, pbkdf2, pbkdf2Single, PBKDF2_ROUND_MAX, randomToken, safeEqual, sha256Hex, serializeCookie, parseCookies, clientIp, nowSec } from './util.js';
 import { getJSON, putJSON, deleteKeys, KEY_CONFIG, KEY_SESSION, KEY_THROTTLE } from './store.js';
 
 export const SESSION_COOKIE = 'hfd_session';
@@ -32,8 +32,20 @@ export async function verifyPassword(config, password) {
     const legacy = await sha256Hex(String(password));
     return safeEqual(legacy, config?.hash || '');
   }
-  const computed = await pbkdf2(String(password), config.salt, config.iterations || 210000);
-  return safeEqual(computed, config.hash);
+  const iterations = config.iterations || 210000;
+  const computed = await pbkdf2(String(password), config.salt, iterations);
+  if (safeEqual(computed, config.hash)) return true;
+
+  // 兼容：早期在「允许大迭代数」的运行时（如本地 wrangler dev）上生成的哈希
+  if (iterations > PBKDF2_ROUND_MAX) {
+    try {
+      const legacy = await pbkdf2Single(String(password), config.salt, iterations);
+      if (safeEqual(legacy, config.hash)) return true;
+    } catch {
+      // 当前运行时不允许大迭代数，忽略
+    }
+  }
+  return false;
 }
 
 export async function createSession(env, request, username) {
