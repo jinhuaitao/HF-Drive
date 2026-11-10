@@ -1,0 +1,15 @@
+{
+  "name": "hf-drive",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Web 版网盘，文件实体存放在 HuggingFace 私有 Storage，元数据放在 Cloudflare R2",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "wrangler deploy --dry-run --outdir=.wrangler/dry-run"
+  },
+  "devDependencies": {
+    "wrangler": "^4"
+  }
+}

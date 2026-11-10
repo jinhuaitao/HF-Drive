@@ -1,0 +1,30 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+
+  // Worker 名称。自动创建的资源（R2 bucket）会以这个名字为前缀。
+  // ⚠️ 在 Cloudflare 控制台连接 GitHub 时，Project name 必须与这里完全一致。
+  "name": "hf-drive",
+  "main": "src/index.js",
+
+  // 兼容日期。取一个各版本运行时都支持的日期，避免老版本 wrangler 回退警告
+  "compatibility_date": "2025-11-01",
+
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "upload_source_maps": true,
+
+  // ⚠️ 关键：只写 binding，不写 bucket_name —— 部署时会自动创建并自动绑定。
+  //    首次使用 R2 的账号需要先在控制台 R2 页面点一次开通，否则会部署失败。
+  "r2_buckets": [{ "binding": "BUCKET" }],
+
+  // 静态前端资源（HTML/CSS/JS），/api/* 交给 Worker 处理
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api", "/api/*"]
+  }
+
+  // 说明：本应用所有第三方密钥（HuggingFace Token）都通过「首次打开时的设置向导」
+  // 写入 R2 的 sys/config.json，不需要在控制台配置任何环境变量。
+}

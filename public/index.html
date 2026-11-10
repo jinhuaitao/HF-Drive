@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="light dark" />
+<title>HF Drive · 私有网盘</title>
+<meta name="description" content="以 HuggingFace 私有仓库为存储后端的网盘" />
+<link rel="stylesheet" href="/assets/app.css" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%234f6ef7'/%3E%3Cpath d='M9 13.5l7-4 7 4v7l-7 4-7-4z' fill='none' stroke='white' stroke-width='2' stroke-linejoin='round'/%3E%3C/svg%3E" />
+</head>
+<body>
+
+<svg xmlns="http://www.w3.org/2000/svg" class="icon-sprite" aria-hidden="true">
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.2c.7 0 1.3.3 1.8.8l1 1.2h7A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M13.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5z"/><path d="M13.5 3v5.5H19"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><circle cx="8.5" cy="10" r="1.6"/><path d="M21 16.5l-4.6-4.4a2 2 0 0 0-2.8 0L5 20"/></symbol>
+  <symbol id="i-video" viewBox="0 0 24 24"><rect x="3" y="5.5" width="13" height="13" rx="2.5"/><path d="M16 11l4.2-2.4a.6.6 0 0 1 .8.5v5.8a.6.6 0 0 1-.8.5L16 13z"/></symbol>
+  <symbol id="i-audio" viewBox="0 0 24 24"><path d="M9 18V6.5l10-2v11"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="15.5" r="2.5"/></symbol>
+  <symbol id="i-archive" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M3 9.5h18"/><path d="M10 13h4"/></symbol>
+  <symbol id="i-code" viewBox="0 0 24 24"><path d="M9 8l-4 4 4 4"/><path d="M15 8l4 4-4 4"/></symbol>
+  <symbol id="i-sheet" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M9 9.5V19.5M15 9.5V19.5"/></symbol>
+  <symbol id="i-slide" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="12" rx="2"/><path d="M12 16.5V20M8.5 20h7"/></symbol>
+  <symbol id="i-doc" viewBox="0 0 24 24"><path d="M13.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5z"/><path d="M8.5 12h7M8.5 15.5h7M8.5 8.5h3"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4.5"/><path d="M7.5 9L12 4.5 16.5 9"/><path d="M4.5 15v3A2.5 2.5 0 0 0 7 20.5h10a2.5 2.5 0 0 0 2.5-2.5v-3"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4.5V16"/><path d="M7.5 11.5L12 16l4.5-4.5"/><path d="M4.5 15v3A2.5 2.5 0 0 0 7 20.5h10a2.5 2.5 0 0 0 2.5-2.5v-3"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.5 7h15"/><path d="M9.5 7V5.2A1.2 1.2 0 0 1 10.7 4h2.6a1.2 1.2 0 0 1 1.2 1.2V7"/><path d="M6.5 7l.8 12A2 2 0 0 0 9.3 21h5.4a2 2 0 0 0 2-1.9L17.5 7"/><path d="M10.5 11v6M13.5 11v6"/></symbol>
+  <symbol id="i-restore" viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.6-5.7"/><path d="M4.5 5v4.5H9"/></symbol>
+  <symbol id="i-share" viewBox="0 0 24 24"><circle cx="17.5" cy="6" r="2.6"/><circle cx="6.5" cy="12" r="2.6"/><circle cx="17.5" cy="18" r="2.6"/><path d="M15.2 7.3L8.8 10.7M8.8 13.3l6.4 3.4"/></symbol>
+  <symbol id="i-star" viewBox="0 0 24 24"><path d="M12 4.5l2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 10.2l5.4-.8z"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.4" style="fill:currentColor;stroke:none"/><circle cx="12" cy="12" r="1.4" style="fill:currentColor;stroke:none"/><circle cx="18" cy="12" r="1.4" style="fill:currentColor;stroke:none"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="4" y="4" width="6.5" height="6.5" rx="1.6"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.6"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.6"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.6"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-folder-plus" viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.2c.7 0 1.3.3 1.8.8l1 1.2h7A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/><path d="M12 11v5M9.5 13.5h5"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="M9.5 5.5L16 12l-6.5 6.5"/></symbol>
+  <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="M5.5 9.5L12 16l6.5-6.5"/></symbol>
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 10.5L12 4l8 6.5"/><path d="M6.5 9.5V19a1.5 1.5 0 0 0 1.5 1.5h8a1.5 1.5 0 0 0 1.5-1.5V9.5"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 14.5a1.6 1.6 0 0 0 .3 1.8l.1.1a1.9 1.9 0 1 1-2.7 2.7l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5v.2a1.9 1.9 0 1 1-3.8 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a1.9 1.9 0 1 1-2.7-2.7l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H4a1.9 1.9 0 1 1 0-3.8h.2a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a1.9 1.9 0 1 1 2.7-2.7l.1.1a1.6 1.6 0 0 0 1.8.3h.1a1.6 1.6 0 0 0 1-1.5V4a1.9 1.9 0 1 1 3.8 0v.2a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a1.9 1.9 0 1 1 2.7 2.7l-.1.1a1.6 1.6 0 0 0-.3 1.8v.1a1.6 1.6 0 0 0 1.5 1h.2a1.9 1.9 0 1 1 0 3.8h-.2a1.6 1.6 0 0 0-1.5 1z"/></symbol>
+  <symbol id="i-logout" viewBox="0 0 24 24"><path d="M14.5 8V5.5A1.5 1.5 0 0 0 13 4H6.5A1.5 1.5 0 0 0 5 5.5v13A1.5 1.5 0 0 0 6.5 20H13a1.5 1.5 0 0 0 1.5-1.5V16"/><path d="M10 12h10"/><path d="M17 8.5l3.5 3.5L17 15.5"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M18.7 5.3l-1.4 1.4M6.7 17.3l-1.4 1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></symbol>
+  <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18.5A4.5 4.5 0 0 1 6.5 9.6 6 6 0 0 1 18 11.2a3.7 3.7 0 0 1-.5 7.3z"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10.5 13.5a4 4 0 0 0 5.7 0l2.3-2.3a4 4 0 0 0-5.7-5.7l-1.3 1.3"/><path d="M13.5 10.5a4 4 0 0 0-5.7 0l-2.3 2.3a4 4 0 0 0 5.7 5.7l1.3-1.3"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11.5" height="11.5" rx="2"/><path d="M15.5 8.5v-2A2 2 0 0 0 13.5 4.5H6a2 2 0 0 0-2 2v7.5a2 2 0 0 0 2 2h2"/></symbol>
+  <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M15.5 5.5l3 3"/><path d="M4.5 19.5l1-4.2L16.2 4.6a1.8 1.8 0 0 1 2.6 0l.6.6a1.8 1.8 0 0 1 0 2.6L8.7 18.5z"/></symbol>
+  <symbol id="i-move" viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.2c.7 0 1.3.3 1.8.8l1 1.2h7A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/><path d="M9.5 12.5h5"/><path d="M12.5 10.5l2 2-2 2"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.5"/><circle cx="12" cy="7.8" r="1" style="fill:currentColor;stroke:none"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4.5V10h-5.5"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4.5" y="10.5" width="15" height="10" rx="2.5"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 6 12 6s9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6z"/><circle cx="12" cy="12" r="2.8"/></symbol>
+  <symbol id="i-sort" viewBox="0 0 24 24"><path d="M8 5v14M4.5 15.5L8 19l3.5-3.5"/><path d="M16 19V5M12.5 8.5L16 5l3.5 3.5"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="i-arrow-left" viewBox="0 0 24 24"><path d="M19 12H5"/><path d="M11 6l-6 6 6 6"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5l11 6.5-11 6.5z"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3.5l7 2.5v6c0 4.2-2.9 7.4-7 8.5-4.1-1.1-7-4.3-7-8.5V6z"/><path d="M9 12l2.2 2.2L15.5 10"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="8" r="3.5"/><path d="M10.5 10.5L20 20"/><path d="M17 17l2-2M14.5 14.5l2-2"/></symbol>
+  <symbol id="i-drive" viewBox="0 0 24 24"><rect x="3" y="13" width="18" height="6.5" rx="2"/><path d="M5.5 13l2-6.5A2 2 0 0 1 9.4 5h5.2a2 2 0 0 1 1.9 1.5l2 6.5"/><circle cx="7" cy="16.2" r="1" style="fill:currentColor;stroke:none"/></symbol>
+</svg>
+
+<div id="boot" class="boot">
+  <div class="boot-inner">
+    <div class="spinner"></div>
+    <p>正在连接存储…</p>
+  </div>
+</div>
+
+<div id="auth" class="auth-root hidden"></div>
+<div id="share-root" class="share-root hidden"></div>
+
+<div id="app" class="app hidden">
+  <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="brand-logo">
+        <svg viewBox="0 0 32 32"><path d="M8 12.5l8-4.5 8 4.5v8l-8 4.5-8-4.5z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/><path d="M8 12.5l8 4.5 8-4.5M16 17v8" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round" opacity=".65"/></svg>
+      </div>
+      <div class="brand-text">
+        <strong>HF Drive</strong>
+        <span id="brand-sub">HuggingFace 私有存储</span>
+      </div>
+    </div>
+
+    <button class="upload-btn" id="btn-upload-main">
+      <svg class="i"><use href="#i-plus"></use></svg>
+      <span>上传文件</span>
+    </button>
+
+    <nav class="nav" id="nav">
+      <button class="nav-item active" data-view="files"><svg class="i"><use href="#i-folder"></use></svg><span>全部文件</span></button>
+      <button class="nav-item" data-view="starred"><svg class="i"><use href="#i-star"></use></svg><span>收藏</span></button>
+      <button class="nav-item" data-view="shares"><svg class="i"><use href="#i-share"></use></svg><span>分享链接</span></button>
+      <button class="nav-item" data-view="trash"><svg class="i"><use href="#i-trash"></use></svg><span>回收站</span></button>
+    </nav>
+
+    <div class="storage-card" id="storage-card">
+      <div class="storage-head">
+        <span>已用空间</span>
+        <span class="storage-pct" id="storage-pct">—</span>
+      </div>
+      <div class="storage-bar"><i id="storage-fill"></i><b id="storage-trash"></b></div>
+      <div class="storage-text" id="storage-text">—</div>
+    </div>
+
+    <div class="sidebar-foot">
+      <button class="foot-btn" data-act="theme" title="切换主题"><svg class="i" id="theme-icon"><use href="#i-moon"></use></svg></button>
+      <button class="foot-btn" data-act="settings" title="设置"><svg class="i"><use href="#i-settings"></use></svg></button>
+      <button class="foot-btn" data-act="logout" title="退出登录"><svg class="i"><use href="#i-logout"></use></svg></button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <button class="icon-btn only-mobile" id="btn-menu" aria-label="菜单"><svg class="i"><use href="#i-menu"></use></svg></button>
+      <div class="crumbs" id="crumbs"></div>
+      <div class="search-wrap">
+        <svg class="i"><use href="#i-search"></use></svg>
+        <input id="search" type="text" placeholder="搜索文件…" autocomplete="off" spellcheck="false" />
+        <button class="search-clear hidden" id="search-clear" aria-label="清空"><svg class="i"><use href="#i-x"></use></svg></button>
+      </div>
+      <div class="topbar-right">
+        <div class="seg" id="view-toggle">
+          <button data-mode="list" class="active" title="列表视图"><svg class="i"><use href="#i-list"></use></svg></button>
+          <button data-mode="grid" title="网格视图"><svg class="i"><use href="#i-grid"></use></svg></button>
+        </div>
+        <button class="icon-btn" id="btn-refresh" title="刷新"><svg class="i"><use href="#i-refresh"></use></svg></button>
+      </div>
+    </header>
+
+    <div class="toolbar" id="toolbar"></div>
+
+    <div class="content" id="content">
+      <div class="content-inner" id="content-inner"></div>
+    </div>
+  </main>
+</div>
+
+<div id="modal-root"></div>
+<div id="upload-panel" class="upload-panel hidden"></div>
+<div id="toast-root" class="toast-root"></div>
+<div id="drop-overlay" class="drop-overlay hidden"><div class="drop-inner"><svg class="i"><use href="#i-upload"></use></svg><p>松开鼠标上传到当前目录</p></div></div>
+<input type="file" id="file-input" multiple hidden />
+<input type="file" id="folder-input" webkitdirectory directory multiple hidden />
+
+<script type="module" src="/assets/app.js"></script>
+</body>
+</html>
