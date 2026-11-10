@@ -48,6 +48,9 @@ export async function deleteKeys(env, keys) {
   }
 }
 
+/** 索引变更标记：由 api 层在响应后据此决定要不要把快照刷到 HF 仓库 */
+export const indexState = { dirty: false, writes: 0 };
+
 /** 带重试的索引读改写；fn 直接修改传入的 index 对象 */
 export async function mutateIndex(env, fn) {
   for (let attempt = 0; attempt < 8; attempt++) {
@@ -59,6 +62,8 @@ export async function mutateIndex(env, fn) {
     const ok = await putJSON(env, KEY_INDEX, index, cur?.etag);
     if (ok) {
       cacheSet('index', index, INDEX_TTL);
+      indexState.dirty = true;
+      indexState.writes++;
       return result;
     }
     await sleep(15 + Math.random() * 60 * (attempt + 1));

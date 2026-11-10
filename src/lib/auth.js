@@ -54,6 +54,46 @@ export async function verifyPassword(config, password) {
 
 const SESSION_CACHE_TTL = 15000;
 
+// 过期会话惰性清理：登录时顺带做，24 小时最多一次
+const KEY_MAINT = 'sys/maintenance.json';
+const SWEEP_INTERVAL = 60 * 60 * 24;
+const SWEEP_MAX = 1000;
+const SWEEP_CONCURRENCY = 20;
+
+/**
+ * 会话对象不随文件大小增长，但每登录一次就 +1，且过期后只有「再被访问」才会被删。
+ * 长期用下来会攒一批死对象（虽然只有几百字节），这里做惰性清扫兜住。
+ */
+export async function sweepSessions(env) {
+  try {
+    const now = nowSec();
+    const cur = await getJSON(env, KEY_MAINT);
+    if (cur?.value?.sweptAt && now - cur.value.sweptAt < SWEEP_INTERVAL) return 0;
+    await putJSON(env, KEY_MAINT, { sweptAt: now });
+
+    const listed = await env.BUCKET.list({ prefix: 'sys/sessions/', limit: SWEEP_MAX });
+    const keys = (listed.objects || []).map((o) => o.key);
+    if (!keys.length) return 0;
+
+    const dead = [];
+    for (let i = 0; i < keys.length; i += SWEEP_CONCURRENCY) {
+      const batch = keys.slice(i, i + SWEEP_CONCURRENCY);
+      const hits = await Promise.all(
+        batch.map(async (k) => {
+          const rec = await getJSON(env, k);
+          const exp = rec?.value?.exp;
+          return exp && exp < now ? k : null;
+        })
+      );
+      for (const k of hits) if (k) dead.push(k);
+    }
+    if (dead.length) await deleteKeys(env, dead);
+    return dead.length;
+  } catch {
+    return 0; // 清扫失败绝不影响登录
+  }
+}
+
 export async function createSession(env, request, username) {
   const token = randomToken(32);
   const exp = nowSec() + SESSION_TTL;
@@ -66,6 +106,7 @@ export async function createSession(env, request, username) {
   };
   await putJSON(env, KEY_SESSION(token), session);
   cacheSet('sess:' + token, session, SESSION_CACHE_TTL);
+  await sweepSessions(env);
   return { token, exp };
 }
 

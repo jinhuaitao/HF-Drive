@@ -1389,11 +1389,27 @@ function renderSettings(box) {
     rebuild.textContent = '扫描中…';
     try {
       const res = await api.post('/settings/rebuild', {});
-      toast(`扫描 ${res.scanned} 个分片，恢复 ${res.recovered} 个文件`, 'ok');
+      if (res.fromSnapshot) {
+        toast(`扫描 ${res.scanned} 个分片，恢复 ${res.recovered} 个文件（其中 ${res.named} 个还原了原始名称和目录）`, 'ok');
+      } else {
+        toast(`扫描 ${res.scanned} 个分片，恢复 ${res.recovered} 个文件（没有索引快照，名称只能显示为「恢复的文件 xxxx」）`, 'info');
+      }
       refresh();
     } catch (err) { toast(err.message, 'err'); }
     rebuild.disabled = false;
     rebuild.textContent = '从仓库重建索引';
+  });
+
+  const backupBtn = h('button', { class: 'btn', text: '立即备份索引' });
+  backupBtn.addEventListener('click', async () => {
+    backupBtn.disabled = true;
+    backupBtn.textContent = '备份中…';
+    try {
+      const res = await api.post('/settings/backup', {});
+      toast(`已把 ${res.nodes} 个条目的索引快照写入仓库（${res.path}）`, 'ok');
+    } catch (err) { toast(err.message, 'err'); }
+    backupBtn.disabled = false;
+    backupBtn.textContent = '立即备份索引';
   });
 
   wrap.append(h('div', { class: 'settings-card' },
@@ -1402,10 +1418,13 @@ function renderSettings(box) {
     h('div', { class: 'kv' }, h('span', { text: '当前仓库' }), h('span', { class: 'mono', text: state.storage?.repo || '—' })),
     h('div', { class: 'kv' }, h('span', { text: '已用空间' }), h('span', { text: `${fmtBytes(state.stats?.used || 0)}${state.stats?.trash ? `（回收站另有 ${fmtBytes(state.stats.trash)}）` : ''}` })),
     h('div', { class: 'kv' }, h('span', { text: '文件 / 文件夹' }), h('span', { text: `${state.stats?.files || 0} / ${state.stats?.folders || 0}` })),
+    h('p', { class: 'desc', style: 'margin-top:10px' },
+      h('span', { html: '索引会自动快照到仓库的 <code>_backup/index.json.gz</code>（写入后最多 60 秒一次）。R2 丢失时，靠它恢复文件名和目录结构。' })
+    ),
     h('div', { style: 'height:16px' }),
     h('div', { class: 'field' }, h('label', { text: '更换 Access Token' }), token),
     h('div', { class: 'field' }, h('label', { text: '仓库名称' }), repo),
-    h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' }, saveStorage, rebuild)
+    h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' }, saveStorage, rebuild, backupBtn)
   ));
 
   // 关于

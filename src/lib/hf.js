@@ -84,6 +84,11 @@ export function chunkPath(nodeId, index) {
   return `chunks/${nodeId}/${String(index).padStart(6, '0')}.bin`;
 }
 
+/** 文件自描述元数据（文件名/目录），用于灾难恢复时还原真实文件名 */
+export function metaPath(nodeId) {
+  return `meta/${nodeId}.json`;
+}
+
 async function sha256HexOf(bytes) {
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
@@ -108,9 +113,16 @@ export async function lfsBatch({ token, repo, objects, type = 'dataset', operati
   return res.json().catch(() => ({}));
 }
 
-/** 提交里引用已经上传好的 LFS 对象（commit 的 ndjson 用 lfsFile 这个 key） */
-export async function commitLfs({ token, repo, files, summary, type = 'dataset' }) {
+/**
+ * 提交里引用已经上传好的 LFS 对象（commit 的 ndjson 用 lfsFile 这个 key）。
+ * inlineFiles 可以顺带提交纯文本小文件（HF 允许 file / lfsFile 混在同一次 commit 里），
+ * 用来把「文件名的自描述元数据」挂在分片提交上，零额外请求。
+ */
+export async function commitLfs({ token, repo, files, inlineFiles, summary, type = 'dataset' }) {
   const lines = [{ key: 'header', value: { summary: summary || `upload ${files.length} file(s)` } }];
+  for (const f of inlineFiles || []) {
+    lines.push({ key: 'file', value: { path: f.path, encoding: 'base64', content: bytesToB64(f.bytes) } });
+  }
   for (const f of files) {
     lines.push({ key: 'lfsFile', value: { path: f.path, algo: 'sha256', oid: f.oid, size: f.size } });
   }
@@ -167,7 +179,7 @@ async function putObject(href, headers, bytes) {
  * 上传一个分片：算 sha256 → lfs batch → PUT 到预签名地址 → commit 引用。
  * 内容相同（服务端已有）时 batch 返回 actions 为 null，直接引用即可，天然去重。
  */
-export async function uploadChunkLfs({ token, repo, path, bytes, summary, type = 'dataset' }) {
+export async function uploadChunkLfs({ token, repo, path, bytes, summary, extraFiles, type = 'dataset' }) {
   const oid = await sha256HexOf(bytes);
   const size = bytes.byteLength;
 
@@ -185,7 +197,14 @@ export async function uploadChunkLfs({ token, repo, path, bytes, summary, type =
     await putObject(action.href, { ...(action.header || {}) }, bytes);
     await verifyObject(obj.actions?.verify, { oid, size });
   }
-  await commitLfs({ token, repo, files: [{ path, oid, size }], summary: summary || `upload ${path}`, type });
+  await commitLfs({
+    token,
+    repo,
+    files: [{ path, oid, size }],
+    inlineFiles: extraFiles,
+    summary: summary || `upload ${path}`,
+    type,
+  });
   return { oid, deduped: !action };
 }
 

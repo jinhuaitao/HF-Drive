@@ -8,6 +8,7 @@ import {
 import {
   getJSON, putJSON, deleteKeys, mutateIndex, readIndex, mutateShares, readShares,
   getNode, childrenOf, subtreeIds, isDescendant, pathOf, uniqueName, usedBytes, publicNode,
+  indexState,
   KEY_INDEX, KEY_UPLOAD, KEY_SESSION, KEY_SHARES,
 } from './lib/store.js';
 import * as HF from './lib/hf.js';
@@ -16,14 +17,73 @@ import { buildZipStream, zipHeaders } from './lib/zip.js';
 const CHUNK_SIZE = 8 * 1024 * 1024; // 8MB / 分片
 const MAX_UPLOAD = 50 * 1024 * 1024 * 1024; // 50GB
 const MAX_ZIP = 3.6 * 1024 * 1024 * 1024; // ZIP 上限（未做 zip64）
-const VERSION = '1.1.1';
+const VERSION = '1.1.2';
 
 const json = U.json;
 const fail = U.fail;
+const enc = new TextEncoder();
+
+// ---------------------------------------------------------------- 索引快照（灾难恢复）
+
+const BACKUP_PATH = '_backup/index.json.gz';
+const BACKUP_INTERVAL = 60 * 1000;
+let lastBackupAt = 0;
+
+async function gzipBytes(bytes) {
+  const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+async function gunzipBytes(bytes) {
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+/**
+ * 把索引压成 gzip 存进 HF 仓库。
+ * R2 是唯一的元数据来源，丢了就只剩「恢复的文件 xxxxxx」；
+ * 有了这份快照，重建索引能 100% 还原文件名、目录结构、收藏状态。
+ */
+async function backupIndex(env) {
+  const config = await readConfig(env);
+  if (!config?.hf?.token || !config?.hf?.repo) return;
+  const index = await readIndex(env);
+  const count = Object.keys(index.nodes).length;
+  if (!count) return;
+  const raw = enc.encode(JSON.stringify({ v: 1, savedAt: Date.now(), nodes: index.nodes }));
+  const gz = await gzipBytes(raw);
+  await HF.uploadChunkLfs({
+    token: config.hf.token,
+    repo: config.hf.repo,
+    path: BACKUP_PATH,
+    bytes: gz,
+    summary: `hf-drive: index snapshot (${count} nodes)`,
+  });
+}
+
+/** 请求结束后按节流把快照刷出去；不阻塞响应 */
+function scheduleIndexBackup(env, execCtx) {
+  if (!indexState.dirty) return;
+  const now = Date.now();
+  if (now - lastBackupAt < BACKUP_INTERVAL) return;
+  lastBackupAt = now;
+  indexState.dirty = false;
+  const task = backupIndex(env).catch((err) => {
+    console.warn('索引快照失败:', err?.message || err);
+  });
+  if (execCtx?.waitUntil) execCtx.waitUntil(task);
+}
+
+/** 手动触发一次快照（测试 / 设置页「立即备份」用） */
+export async function flushIndexBackup(env) {
+  indexState.dirty = false;
+  lastBackupAt = Date.now();
+  await backupIndex(env);
+}
 
 // ---------------------------------------------------------------- 入口
 
-export async function handleApi(request, env) {
+export async function handleApi(request, env, execCtx) {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, '') || '/api';
   const method = request.method.toUpperCase();
@@ -33,7 +93,10 @@ export async function handleApi(request, env) {
   }
 
   try {
-    return await route(request, env, url, path, method);
+    const res = await route(request, env, url, path, method);
+    // 索引有变更就顺带把快照刷到 HF 仓库（节流 + 异步，不拖慢本次响应）
+    scheduleIndexBackup(env, execCtx);
+    return res;
   } catch (err) {
     if (err instanceof HF.HFError) {
       return fail(err.status === 401 ? 401 : 502, 'hf_error', err.message);
@@ -82,6 +145,7 @@ async function route(request, env, url, path, method) {
   if (path === '/api/settings/account' && method === 'POST') return apiChangeAccount(ctx);
   if (path === '/api/settings/storage' && method === 'POST') return apiChangeStorage(ctx);
   if (path === '/api/settings/rebuild' && method === 'POST') return apiRebuild(ctx);
+  if (path === '/api/settings/backup' && method === 'POST') return apiBackupNow(ctx);
 
   let m;
   if ((m = /^\/api\/nodes\/([A-Za-z0-9_]+)$/.exec(path)) && method === 'PATCH') return apiPatchNode(ctx, m[1]);
@@ -146,6 +210,51 @@ function visibleSet(index) {
 
 function pathString(index, id) {
   return '/' + pathOf(index, id).join('/');
+}
+
+/**
+ * 文件的自描述元数据：跟分片一起提交到 HF 仓库的 meta/<id>.json。
+ * 这样即使 R2 全丢，重建索引也能恢复真实文件名和目录结构，
+ * 而不是一堆「恢复的文件 xxxxxx」。
+ */
+function buildFileMeta({ id, name, parentPath, mime, size, createdAt }) {
+  return {
+    v: 1,
+    id,
+    name,
+    type: 'file',
+    parentPath: parentPath || '/',
+    mime: mime || '',
+    size: size || 0,
+    createdAt: createdAt || Date.now(),
+  };
+}
+
+function metaFileOf(meta) {
+  return { path: HF.metaPath(meta.id), bytes: enc.encode(JSON.stringify(meta)) };
+}
+
+/** 把某个文件的元数据写回 HF 仓库（失败不阻塞主流程） */
+async function syncFileMeta(env, config, index, id) {
+  const node = getNode(index, id);
+  if (!node || node.type !== 'file') return;
+  if (!config?.hf?.token) return;
+  const parentPath = node.parent && node.parent !== 'root' ? pathString(index, node.parent) : '/';
+  const meta = buildFileMeta({
+    id,
+    name: node.name,
+    parentPath,
+    mime: node.mime,
+    size: node.size,
+    createdAt: node.createdAt,
+  });
+  const f = metaFileOf(meta);
+  await HF.commitInline({
+    token: config.hf.token,
+    repo: config.hf.repo,
+    files: [f],
+    summary: `hf-drive: meta ${node.name}`,
+  });
 }
 
 function ancestorsOf(index, id) {
@@ -459,6 +568,16 @@ async function apiPatchNode(ctx, id) {
     if (typeof body.starred === 'boolean') node.starred = body.starred;
     return publicNode(node);
   });
+
+  // 改名 / 移动后同步 HF 里的自描述元数据，保证灾难恢复时拿到的是新名字
+  if (typeof body.name === 'string' || typeof body.parent === 'string') {
+    try {
+      const index = await readIndex(ctx.env);
+      await syncFileMeta(ctx.env, ctx.config, index, id);
+    } catch {
+      // 同步失败不影响重命名本身
+    }
+  }
   return json({ ok: true, node: result });
 }
 
@@ -553,6 +672,24 @@ async function apiUploadChunk(ctx) {
   const hf = hfCfg(ctx.config);
   const bytes = new Uint8Array(buf);
   const summary = `upload ${id} part ${indexNum + 1}/${rec.chunks}`;
+
+  // 第一个分片顺带把「文件是谁」一起提交：零额外请求，
+  // 但换来的是 R2 丢了之后还能恢复真实文件名和目录。
+  let extraFiles;
+  if (indexNum === 0) {
+    const index = await readIndex(ctx.env);
+    const parentPath = rec.parent && rec.parent !== 'root' ? pathString(index, rec.parent) : '/';
+    const meta = buildFileMeta({
+      id,
+      name: rec.name,
+      parentPath,
+      mime: rec.mime,
+      size: rec.size,
+      createdAt: Date.now(),
+    });
+    extraFiles = [metaFileOf(meta)];
+  }
+
   try {
     // 二进制内容必须走 git-lfs（HF 的 Xet 仓库拒收内联二进制 blob）
     await HF.uploadChunkLfs({
@@ -561,6 +698,7 @@ async function apiUploadChunk(ctx) {
       path: HF.chunkPath(id, indexNum),
       bytes,
       summary,
+      extraFiles,
     });
   } catch (err) {
     // 仓库不支持 LFS 时退回内联 base64（仅对文本内容有效）
@@ -714,6 +852,7 @@ async function purgeMany(ctx, ids, { onlyTrashed }) {
     const node = index.nodes[id];
     if (node?.type === 'file' && node.chunks > 0) {
       for (let i = 0; i < node.chunks; i++) chunkPaths.push(HF.chunkPath(id, i));
+      chunkPaths.push(HF.metaPath(id)); // 元数据跟着分片一起删，一次 commit 搞定
     }
   }
   if (hf && chunkPaths.length) {
@@ -1111,8 +1250,9 @@ async function apiListShares(ctx) {
       expired: Boolean(s.expiresAt && s.expiresAt < now),
       allowDownload: s.allowDownload,
       createdAt: s.createdAt,
-      views: s.views || 0,
-      downloads: s.downloads || 0,
+      // 缓冲里还没落盘的增量也要算进去，否则管理页会滞后 30 秒
+      views: (s.views || 0) + (shareStatBuffer.get(s.token)?.views || 0),
+      downloads: (s.downloads || 0) + (shareStatBuffer.get(s.token)?.downloads || 0),
       missing: !index.nodes[s.nodeId],
     }))
     .sort((a, b) => b.createdAt - a.createdAt);
@@ -1181,6 +1321,7 @@ async function apiPublicShare(request, env, token, rest, method) {
     const value = await shareUnlockValue(config, token);
     return json({ ok: true, unlocked: true }, 200, {
       'Set-Cookie': U.serializeCookie(cookieName, value, { maxAge: 60 * 60 * 24 * 7, httpOnly: true, secure: true, sameSite: 'Lax' }),
+      'Cache-Control': 'no-store, must-revalidate',
     });
   }
 
@@ -1205,16 +1346,9 @@ async function apiPublicShare(request, env, token, rest, method) {
         .filter((n) => !n.trashedAt)
         .map((n) => ({ ...publicNode(n), path: pathString(index, n.parent) }));
     }
-    if (unlocked) {
-      try {
-        await mutateShares(env, (shares) => {
-          const s = shares.shares[token];
-          if (s) s.views = (s.views || 0) + 1;
-          return null;
-        });
-      } catch {}
-    }
-    return json(payload);
+    if (unlocked) await bumpShareStat(env, token, 'views');
+    // 分享状态（是否解锁/是否过期）随访问实时变化，绝不能被任何一层缓存
+    return json(payload, 200, { 'Cache-Control': 'no-store, must-revalidate' });
   }
 
   if (!unlocked) return fail(401, 'locked', '需要提取密码');
@@ -1265,16 +1399,45 @@ async function apiPublicShare(request, env, token, rest, method) {
   return fail(404, 'not_found', '未知的分享请求');
 }
 
-async function bumpShareStat(env, token, field) {
+// 分享访问计数：内存累加 + 30 秒合并写一次。
+// 热门链接被反复访问时，不应该每次都重写 shares.json（否则 Class A 写入会被打爆）。
+const shareStatBuffer = new Map();
+const SHARE_FLUSH_INTERVAL = 30 * 1000;
+let lastShareFlush = 0;
+
+async function flushShareStats(env) {
+  if (!shareStatBuffer.size) return;
+  const pending = new Map(shareStatBuffer);
+  shareStatBuffer.clear();
   try {
     await mutateShares(env, (shares) => {
-      const s = shares.shares[token];
-      if (s) s[field] = (s[field] || 0) + 1;
+      for (const [token, delta] of pending) {
+        const s = shares.shares[token];
+        if (!s) continue;
+        s.views = (s.views || 0) + (delta.views || 0);
+        s.downloads = (s.downloads || 0) + (delta.downloads || 0);
+      }
       return null;
     });
   } catch {
-    // 计数失败不影响主流程
+    // 写失败就把增量放回缓冲，下一轮再试
+    for (const [token, delta] of pending) {
+      const cur = shareStatBuffer.get(token) || { views: 0, downloads: 0 };
+      cur.views += delta.views || 0;
+      cur.downloads += delta.downloads || 0;
+      shareStatBuffer.set(token, cur);
+    }
   }
+}
+
+async function bumpShareStat(env, token, field) {
+  const rec = shareStatBuffer.get(token) || { views: 0, downloads: 0 };
+  rec[field] = (rec[field] || 0) + 1;
+  shareStatBuffer.set(token, rec);
+  const now = Date.now();
+  if (now - lastShareFlush < SHARE_FLUSH_INTERVAL) return;
+  lastShareFlush = now;
+  await flushShareStats(env);
 }
 
 async function streamPublicFile(env, config, index, node, request) {
@@ -1389,7 +1552,40 @@ async function apiChangeStorage(ctx) {
   return json({ ok: true, repo, owner, changed });
 }
 
-/** 从 HuggingFace 仓库重建索引（灾难恢复用：扫描 chunks/ 前缀） */
+/** 手动触发一次索引快照 */
+async function apiBackupNow(ctx) {
+  hfCfg(ctx.config);
+  const index = await readIndex(ctx.env);
+  const count = Object.keys(index.nodes).length;
+  await backupIndex(ctx.env);
+  return json({ ok: true, nodes: count, path: BACKUP_PATH, at: Date.now() });
+}
+
+/** 按快照里的父链递归还原文件夹，保留原 id（分享链接等仍然有效） */
+function restoreFolder(index, snapNodes, id, depth = 0) {
+  if (!id || id === 'root' || depth > 200) return 'root';
+  if (index.nodes[id]) return id;
+  const s = snapNodes[id];
+  if (!s || s.type !== 'folder' || !s.name) return 'root';
+  const parent = restoreFolder(index, snapNodes, s.parent, depth + 1);
+  const now = Date.now();
+  index.nodes[id] = {
+    id,
+    parent,
+    type: 'folder',
+    name: uniqueName(index, parent, s.name),
+    size: 0,
+    mime: '',
+    createdAt: s.createdAt || now,
+    updatedAt: now,
+    starred: Boolean(s.starred),
+    trashedAt: null,
+    trashParent: null,
+  };
+  return id;
+}
+
+/** 从 HuggingFace 仓库重建索引（灾难恢复：索引快照 + 扫描 chunks/） */
 async function apiRebuild(ctx) {
   const hf = hfCfg(ctx.config);
   const found = new Map();
@@ -1419,31 +1615,59 @@ async function apiRebuild(ctx) {
     if (!cursor) break;
   }
 
+  // 优先用索引快照恢复：文件名、目录结构、收藏一次全回来
+  let snapshot = null;
+  try {
+    const res = await HF.fetchFile({ token: hf.token, repo: hf.repo, path: BACKUP_PATH });
+    if (res.ok) {
+      const gz = new Uint8Array(await res.arrayBuffer());
+      const parsed = JSON.parse(new TextDecoder().decode(await gunzipBytes(gz)));
+      if (parsed?.nodes && typeof parsed.nodes === 'object') snapshot = parsed;
+    }
+  } catch {
+    // 没有快照（老部署或首次使用）就走兜底命名
+  }
+  const snapNodes = snapshot?.nodes || {};
+
+  let named = 0;
   const added = await mutateIndex(ctx.env, (index) => {
     let n = 0;
     for (const rec of found.values()) {
       if (index.nodes[rec.id]) continue;
+      const s = snapNodes[rec.id];
       const now = Date.now();
+      const hasMeta = Boolean(s?.name);
+      const parent = hasMeta ? restoreFolder(index, snapNodes, s.parent) : 'root';
+      const name = hasMeta ? uniqueName(index, parent, s.name) : `恢复的文件 ${rec.id.slice(-6)}`;
+      if (hasMeta) named++;
       index.nodes[rec.id] = {
         id: rec.id,
-        parent: 'root',
+        parent,
         type: 'file',
-        name: `恢复的文件 ${rec.id.slice(-6)}`,
-        size: rec.size,
-        mime: 'application/octet-stream',
+        name,
+        size: s?.size || rec.size,
+        mime: s?.mime || 'application/octet-stream',
         chunks: rec.chunks,
         chunkSize: rec.chunkSize,
-        createdAt: now,
+        createdAt: s?.createdAt || now,
         updatedAt: now,
-        starred: false,
+        starred: Boolean(s?.starred),
         trashedAt: null,
         trashParent: null,
-        recovered: true,
+        recovered: !hasMeta,
       };
       n++;
     }
     return n;
   });
 
-  return json({ ok: true, scanned, recovered: added, total: found.size });
+  return json({
+    ok: true,
+    scanned,
+    recovered: added,
+    named,
+    fromSnapshot: Boolean(snapshot),
+    snapshotAt: snapshot?.savedAt || null,
+    total: found.size,
+  });
 }
