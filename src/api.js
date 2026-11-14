@@ -750,6 +750,14 @@ async function apiUploadComplete(ctx) {
   });
 
   await cleanupUpload(ctx.env, id);
+
+  // 兜底：首片上传时如果走了 base64 兜底、或续传跳过了第 0 片，
+  // meta/<id>.json 可能没写进仓库。这里补一次（失败不阻塞），
+  // 否则将来「彻底删除」会因为 meta 不存在而整批 404。
+  try {
+    await syncFileMeta(ctx.env, ctx.config, await readIndex(ctx.env), id);
+  } catch {}
+
   return json({ ok: true, node });
 }
 
@@ -822,8 +830,8 @@ async function apiPurgeNodes(ctx) {
   const body = await bodyJSON(ctx.request);
   const ids = Array.isArray(body.ids) ? body.ids.filter((x) => typeof x === 'string').slice(0, 500) : [];
   if (!ids.length) return fail(400, 'bad_request', '未选择文件');
-  const removed = await purgeMany(ctx, ids, { onlyTrashed: true });
-  return json({ ok: true, removed });
+  const { removed, skipped } = await purgeMany(ctx, ids, { onlyTrashed: true });
+  return json({ ok: true, removed, skipped });
 }
 
 async function apiEmptyTrash(ctx) {
@@ -831,8 +839,8 @@ async function apiEmptyTrash(ctx) {
   const roots = Object.values(index.nodes)
     .filter((n) => n.trashedAt && !(getNode(index, n.parent)?.trashedAt))
     .map((n) => n.id);
-  const removed = await purgeMany(ctx, roots, { onlyTrashed: false });
-  return json({ ok: true, removed });
+  const { removed, skipped } = await purgeMany(ctx, roots, { onlyTrashed: false });
+  return json({ ok: true, removed, skipped });
 }
 
 async function purgeMany(ctx, ids, { onlyTrashed }) {
@@ -848,6 +856,7 @@ async function purgeMany(ctx, ids, { onlyTrashed }) {
 
   const hf = ctx.config.hf;
   const chunkPaths = [];
+  const skippedPaths = [];
   for (const id of all) {
     const node = index.nodes[id];
     if (node?.type === 'file' && node.chunks > 0) {
@@ -857,12 +866,13 @@ async function purgeMany(ctx, ids, { onlyTrashed }) {
   }
   if (hf && chunkPaths.length) {
     for (let i = 0; i < chunkPaths.length; i += 200) {
-      await HF.deletePaths({
+      const r = await HF.deletePaths({
         token: hf.token,
         repo: hf.repo,
         paths: chunkPaths.slice(i, i + 200),
         summary: `hf-drive: 永久删除 ${Math.min(200, chunkPaths.length - i)} 个分片`,
       });
+      if (r?.skipped?.length) skippedPaths.push(...r.skipped);
     }
   }
 
@@ -879,7 +889,7 @@ async function purgeMany(ctx, ids, { onlyTrashed }) {
       }
     });
   }
-  return all.size;
+  return { removed: all.size, skipped: skippedPaths.length };
 }
 
 async function apiCopyNodes(ctx) {
@@ -978,6 +988,36 @@ async function apiCopyNodes(ctx) {
     }
     return out;
   });
+
+  // 「秒复制」只提交了分片的 lfsFile 引用，没有 meta/<newId>.json。
+  // 不补的话，这些文件将来「彻底删除」时会把不存在的 meta 一起提交给 HF，
+  // 整个 delete commit 返回 404，导致一批文件都删不掉。这里一次性补写（1 次 commit）。
+  try {
+    const idx2 = await readIndex(ctx.env);
+    const files = created
+      .filter(({ newId }) => idx2.nodes[newId]?.type === 'file' && idx2.nodes[newId].chunks > 0)
+      .map(({ newId }) => {
+        const n = idx2.nodes[newId];
+        return metaFileOf(buildFileMeta({
+          id: newId,
+          name: n.name,
+          parentPath: n.parent && n.parent !== 'root' ? pathString(idx2, n.parent) : '/',
+          mime: n.mime,
+          size: n.size,
+          createdAt: n.createdAt,
+        }));
+      });
+    if (files.length) {
+      await HF.commitInline({
+        token: hf.token,
+        repo: hf.repo,
+        files,
+        summary: `hf-drive: meta x${files.length}`,
+      });
+    }
+  } catch (err) {
+    console.warn('补写 meta 失败（不影响复制本身）:', err?.message);
+  }
 
   return json({ ok: true, nodes: newNodes });
 }

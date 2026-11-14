@@ -233,17 +233,39 @@ export async function commitBase64({ token, repo, path, bytes, summary, type = '
   return commitInline({ token, repo, files: [{ path, bytes }], summary: summary || `upload ${path}`, type });
 }
 
-/** 批量删除文件，一次 commit 完成 */
+/** HF 对「删除不存在的路径」是硬失败，返回体形如：
+ *  {"error":"A file with the name \"meta/f_xxx.json\" does not exist"} */
+const MISSING_RE = /A file with the name "([^"]+)" does not exist/;
+
+/**
+ * 批量删除文件，一次 commit 完成。
+ * 幂等：仓库里本来就不存在的路径（老版本上传的文件没有 meta、复制出来的文件没写 meta、
+ * 上一次删除部分成功等）会被自动剔除并重试，不会让整批 200 条一起失败。
+ * 返回 { deleted, skipped }，skipped 是「本来就不存在」的路径。
+ */
 export async function deletePaths({ token, repo, paths, summary, type = 'dataset' }) {
-  if (!paths.length) return {};
-  const lines = [{ key: 'header', value: { summary: summary || `delete ${paths.length} file(s)` } }];
-  for (const p of paths) lines.push({ key: 'deletedFile', value: { path: p } });
-  const res = await hfFetch(`${BASE}/api/${type}s/${repo}/commit/main`, {
-    method: 'POST',
-    headers: authHeaders(token, { 'Content-Type': 'application/x-ndjson' }),
-    body: ndjson(lines),
-  });
-  return res.json().catch(() => ({}));
+  if (!paths.length) return { deleted: 0, skipped: [] };
+  let rest = [...new Set(paths)];
+  const total = rest.length;
+  const skipped = [];
+  for (let round = 0; round < 8 && rest.length; round++) {
+    const lines = [{ key: 'header', value: { summary: summary || `delete ${rest.length} file(s)` } }];
+    for (const p of rest) lines.push({ key: 'deletedFile', value: { path: p } });
+    try {
+      await hfFetch(`${BASE}/api/${type}s/${repo}/commit/main`, {
+        method: 'POST',
+        headers: authHeaders(token, { 'Content-Type': 'application/x-ndjson' }),
+        body: ndjson(lines),
+      });
+      return { deleted: rest.length, skipped };
+    } catch (err) {
+      const m = MISSING_RE.exec(String(err?.detail || err?.message || ''));
+      if (err?.status !== 404 || !m || !rest.includes(m[1])) throw err;
+      rest = rest.filter((p) => p !== m[1]);
+      skipped.push(m[1]);
+    }
+  }
+  return { deleted: total - rest.length, skipped };
 }
 
 /** 列出仓库某个目录下的条目（含 LFS 的 oid / 真实大小） */
